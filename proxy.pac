@@ -1,4 +1,4 @@
 function FindProxyForURL(url, host) {
-    // すべてのインターネット通信を、Renderのプロキシサーバー経由にする指示
-    return "HTTPS ://onrender.com";
+    // HTTPSのあとに半角スペースを1つ空けて、アドレスをそのまま書きます
+    return "HTTPS soocks5-proxy.onrender.com:443";
 }
