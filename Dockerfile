@@ -1,5 +1,4 @@
 FROM ginuerzh/gost:latest
 
-# プログラムが眠らないようにバックグラウンドで起動し、動き続けさせます
-ENTRYPOINT ["/bin/gost"]
-CMD ["-L=http://admin:password@:10000"]
+# ユーザー認証なしの純粋なSOCKS5として、Renderのポート10000番で起動します
+CMD ["sh", "-c", "/bin/gost -L=socks5://:10000"]
