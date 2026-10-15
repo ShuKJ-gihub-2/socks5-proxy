@@ -1,2 +1,3 @@
 FROM ginuerzh/gost:latest
-CMD ["sh", "-c", "/bin/gost -L=http://:10000"]
+ENTRYPOINT ["/bin/gost"]
+CMD ["-L=http://:10000"]
