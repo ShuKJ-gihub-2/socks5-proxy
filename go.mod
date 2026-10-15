@@ -1,4 +1,4 @@
-module my-socks5-proxy
+module socks5-proxy
 
 go 1.21
 
