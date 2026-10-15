@@ -15,11 +15,9 @@ func main() {
 		port = "10000"
 	}
 
-	// RenderのHTTPS(443)から届く通信を、そのままSOCKS5のパケットとして処理するサーバー
 	server := &http.Server{
 		Addr: ":" + port,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// ChromebookがSOCKSとして接続してきた通信を乗っ取る（Hijack）
 			hijacker, ok := w.(http.Hijacker)
 			if !ok {
 				http.Error(w, "Hijack not supported", http.StatusInternalServerError)
@@ -32,127 +30,85 @@ func main() {
 			}
 			defer clientConn.Close()
 
-			// 横取りした通信をそのままSOCKS5プロトコルとして処理する
-			handleSOCKS5(clientConn)
+			// SOCKS4専用の処理を実行
+			handleSOCKS4(clientConn)
 		}),
 	}
 
-	fmt.Printf("Hybrid SOCKS5 Server started on port %s\n", port)
+	fmt.Printf("SOCKS4/4a Dedicated Server started on port %s\n", port)
 	if err := server.ListenAndServe(); err != nil {
 		fmt.Printf("Server error: %v\n", err)
 	}
 }
 
-func handleSOCKS5(c net.Conn) {
-	buf := make([]byte, 257)
-	// 1. 認証リクエストの読み込み
-	if _, err := io.ReadFull(c, buf[:2]); err != nil {
-		return
-	}
-	// SOCKS4(0x04)が来てもSOCKS5(0x05)が来ても両方受け付けるハイブリッド仕様
-	version := buf[0]
-	if version != 0x05 && version != 0x04 {
+func handleSOCKS4(c net.Conn) {
+	buf := make([]byte, 8)
+	
+	// 1. SOCKS4ヘッダー（8バイト）の読み込み
+	// [VN(1) | CD(1) | DSTPORT(2) | DSTIP(4)]
+	if _, err := io.ReadFull(c, buf); err != nil {
 		return
 	}
 
-	if version == 0x05 {
-		// SOCKS5の処理
-		nmethods := int(buf[1])
-		if _, err := io.ReadFull(c, buf[:nmethods]); err != nil {
-			return
-		}
-		c.Write([]byte{0x05, 0x00}) // 認証なしで許可
+	// バージョンが0x04（SOCKS4）でなければ即切断
+	if buf[0] != 0x04 {
+		return
+	}
 
-		// 2. コマンドリクエストの読み込み
-		if _, err := io.ReadFull(c, buf[:4]); err != nil {
-			return
-		}
-		if buf[1] != 0x01 { // CONNECTコマンド以外は終了
-			return
-		}
+	// コマンドが0x01（CONNECT）でなければ即切断
+	if buf[1] != 0x01 {
+		return
+	}
 
-		var addr string
-		switch buf[3] { // アドレスタイプ
-		case 0x01: // IPv4
-			if _, err := io.ReadFull(c, buf[:4]); err != nil {
-				return
-			}
-			addr = net.IP(buf[:4]).String()
-		case 0x03: // ドメイン名（これが重要！リモート名前解決）
-			if _, err := io.ReadFull(c, buf[:1]); err != nil {
-				return
-			}
-			length := int(buf[0])
-			if _, err := io.ReadFull(c, buf[:length]); err != nil {
-				return
-			}
-			addr = string(buf[:length])
-		case 0x04: // IPv6
-			if _, err := io.ReadFull(c, buf[:16]); err != nil {
-				return
-			}
-			addr = net.IP(buf[:16]).String()
-		default:
-			return
-		}
+	port := binary.BigEndian.Uint16(buf[2:4])
+	ip := net.IP(buf[4:8])
+	var host string
 
-		if _, err := io.ReadFull(c, buf[:2]); err != nil {
-			return
+	// USERIDの読み飛ばし（ヌル文字 0x00 が来るまで読む）
+	userIdBuf := make([]byte, 1)
+	for {
+		if _, err := c.Read(userIdBuf); err != nil || userIdBuf[0] == 0x00 {
+			break
 		}
-		port := binary.BigEndian.Uint16(buf[:2])
-		dest := fmt.Sprintf("%s:%d", addr, port)
+	}
 
-		// ターゲットへの接続（Render側で名前解決を実行）
-		remote, err := net.Dial("tcp", dest)
-		if err != nil {
-			c.Write([]byte{0x05, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
-			return
-		}
-		defer remote.Close()
-		c.Write([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
-
-		// パケットの双方向転送
-		relay(c, remote)
-
-	} else if version == 0x04 {
-		// SOCKS4の処理（念のための互換性モード）
-		if buf[1] != 0x01 { // CONNECT
-			return
-		}
-		if _, err := io.ReadFull(c, buf[:6]); err != nil {
-			return
-		}
-		port := binary.BigEndian.Uint16(buf[:2])
-		addr := net.IP(buf[2:6]).String()
-
-		// USERID（ヌル文字まで読み飛ばし）
+	// SOCKS4aの対応（IPが 0.0.0.x の場合、後ろにドメイン名が続く仕様）
+	if ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] != 0 {
+		domainBuf := make([]byte, 1)
+		var domainBytes []byte
 		for {
-			b := make([]byte, 1)
-			if _, err := c.Read(b); err != nil || b[0] == 0x00 {
+			if _, err := c.Read(domainBuf); err != nil || domainBuf[0] == 0x00 {
 				break
 			}
+			domainBytes = append(domainBytes, domainBuf[0])
 		}
-
-		remote, err := net.Dial("tcp", fmt.Sprintf("%s:%d", addr, port))
-		if err != nil {
-			c.Write([]byte{0x00, 0x5b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
-			return
-		}
-		defer remote.Close()
-		c.Write([]byte{0x00, 0x5a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
-
-		relay(c, remote)
+		host = string(domainBytes) // リモート名前解決用のドメイン名を取得
+	} else {
+		host = ip.String() // 通常のIPアドレス
 	}
-}
 
-func relay(client, remote net.Conn) {
+	dest := fmt.Sprintf("%s:%d", host, port)
+
+	// 2. 宛先サーバーへ接続（Render側から直通で繋ぎにいきます）
+	remote, err := net.Dial("tcp", dest)
+	if err != nil {
+		// 接続失敗のレスポンス（拒否: 0x5b）
+		c.Write([]byte{0x00, 0x5b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+		return
+	}
+	defer remote.Close()
+
+	// 接続成功のレスポンス（許可: 0x5a）
+	c.Write([]byte{0x00, 0x5a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+
+	// 3. データの中継（双方向コピー）
 	errc := make(chan error, 2)
 	go func() {
-		_, err := io.Copy(remote, client)
+		_, err := io.Copy(remote, c)
 		errc <- err
 	}()
 	go func() {
-		_, err := io.Copy(client, remote)
+		_, err := io.Copy(c, remote)
 		errc <- err
 	}()
 	<-errc
