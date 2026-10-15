@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -64,11 +63,11 @@ func handle(c net.Conn) {
 		if _, err := io.ReadFull(c, buf[:1]); err != nil {
 			return
 		}
-		len := int(buf[0])
-		if _, err := io.ReadFull(c, buf[:len]); err != nil {
+		length := int(buf[0])
+		if _, err := io.ReadFull(c, buf[:length]); err != nil {
 			return
 		}
-		addr = string(buf[:len])
+		addr = string(buf[:length])
 	case 0x04:
 		if _, err := io.ReadFull(c, buf[:16]); err != nil {
 			return
