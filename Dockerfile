@@ -1,4 +1,4 @@
 FROM ginuerzh/gost:latest
 
-# ユーザー名「myuser」パスワード「mypassword」で暗号化プロキシを起動
-CMD ["sh", "-c", "/bin/gost -L=http://myuser:mypassword@:8080"]
+# 待ち受けるポートをRender指定の「10000」に変更します
+CMD ["sh", "-c", "/bin/gost -L=http://admin:password@:10000"]
