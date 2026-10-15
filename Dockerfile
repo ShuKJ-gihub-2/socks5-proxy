@@ -1,2 +1,2 @@
 FROM ginuerzh/gost:latest
-CMD ["sh", "-c", "/bin/gost -L=socks5://:10000"]
+CMD ["sh", "-c", "/bin/gost -L=http://:10000"]
