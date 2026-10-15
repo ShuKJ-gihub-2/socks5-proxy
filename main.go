@@ -1,27 +1,67 @@
 package main
 
 import (
-	"fmt"
+	"log"
 	"net/http"
 	"os"
+
+	"github.com/armon/go-socks5"
 	"://github.com"
 )
 
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
 func main() {
+	// Renderが指定するポート（デフォルトは8080）を取得
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "10000"
+		port = "8080"
 	}
 
-	// 世界標準のプロキシエンジンを起動
-	proxy := goproxy.NewProxyHttpServer()
-	proxy.Verbose = true
+	// 認証用トークン（環境変数から取得）
+	secretToken := os.Getenv("PROXY_TOKEN")
+	if secretToken == "" {
+		log.Fatal("PROXY_TOKEN environment variable is required")
+	}
 
-	// すべてのトンネル通信（HTTPS）をそのまま直通させる
-	proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
+	// SOCKS5サーバーの初期化
+	conf := &socks5.Config{}
+	socksServer, err := socks5.New(conf)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	fmt.Printf("Goproxy Engine started on port %s\n", port)
-	if err := http.ListenAndServe(":"+port, proxy); err != nil {
-		fmt.Printf("Server error: %v\n", err)
+	// WebSocketエンドポイントのハンドラー
+	http.HandleFunc("/proxy", func(w http.ResponseWriter, r *http.Request) {
+		// 簡易的なトークン認証
+		token := r.URL.Query().Get("token")
+		if token != secretToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// WebSocketへアップグレード
+		ws, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Println("Upgrade error:", err)
+			return
+		}
+		defer ws.Close()
+
+		// WebSocket接続をネット標準のConnインターフェースにラップしてSOCKSへ流す
+		// ※実用にはWS/TCP相互変換をサポートするライブラリやラッパーを噛ませるか、
+		// 既存のOSS（shadowsocks+v2ray-plugin、gost等）の利用が一般的です。
+	})
+
+	// ヘルスチェック用
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Response) {
+		w.Write([]byte("OK"))
+	})
+
+	log.Printf("Server starting on port %s...", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Fatal(err)
 	}
 }
