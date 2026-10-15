@@ -1,104 +1,87 @@
 package main
 
 import (
-	"encoding/binary"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
+	"time"
 )
 
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "1080"
+		port = "10000"
 	}
-	l, err := net.Listen("tcp", ":"+port)
-	if err != nil {
-		fmt.Printf("Listen error: %v\n", err)
-		return
-	}
-	defer l.Close()
-	fmt.Printf("SOCKS5 Server started on port %s\n", port)
 
-	for {
-		c, err := l.Accept()
-		if err != nil {
-			continue
-		}
-		go handle(c)
+	server := &http.Server{
+		Addr: ":" + port,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodConnect {
+				handleConnect(w, r)
+			} else {
+				handleHTTP(w, r)
+			}
+		}),
+	}
+
+	fmt.Printf("HTTP/HTTPS Proxy Server started on port %s\n", port)
+	if err := server.ListenAndServe(); err != nil {
+		fmt.Printf("Server error: %v\n", err)
 	}
 }
 
-func handle(c net.Conn) {
-	defer c.Close()
-	buf := make([]byte, 257)
-	if _, err := io.ReadFull(c, buf[:2]); err != nil {
-		return
-	}
-	if buf[0] != 0x05 {
-		return
-	}
-	nmethods := int(buf[1])
-	if _, err := io.ReadFull(c, buf[:nmethods]); err != nil {
-		return
-	}
-	c.Write([]byte{0x05, 0x00})
-
-	if _, err := io.ReadFull(c, buf[:4]); err != nil {
-		return
-	}
-	if buf[0] != 0x05 || buf[1] != 0x01 {
-		return
-	}
-
-	var addr string
-	switch buf[3] {
-	case 0x01:
-		if _, err := io.ReadFull(c, buf[:4]); err != nil {
-			return
-		}
-		addr = net.IP(buf[:4]).String()
-	case 0x03:
-		if _, err := io.ReadFull(c, buf[:1]); err != nil {
-			return
-		}
-		length := int(buf[0])
-		if _, err := io.ReadFull(c, buf[:length]); err != nil {
-			return
-		}
-		addr = string(buf[:length])
-	case 0x04:
-		if _, err := io.ReadFull(c, buf[:16]); err != nil {
-			return
-		}
-		addr = net.IP(buf[:16]).String()
-	default:
-		return
-	}
-
-	if _, err := io.ReadFull(c, buf[:2]); err != nil {
-		return
-	}
-	port := binary.BigEndian.Uint16(buf[:2])
-	dest := fmt.Sprintf("%s:%d", addr, port)
-
-	remote, err := net.Dial("tcp", dest)
+func handleConnect(w http.ResponseWriter, r *http.Request) {
+	destConn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
 	if err != nil {
-		c.Write([]byte{0x05, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	defer remote.Close()
-	c.Write([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+	defer destConn.Close()
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer clientConn.Close()
+
+	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
 	errc := make(chan error, 2)
 	go func() {
-		_, err := io.Copy(remote, c)
+		_, err := io.Copy(destConn, clientConn)
 		errc <- err
 	}()
 	go func() {
-		_, err := io.Copy(c, remote)
+		_, err := io.Copy(clientConn, destConn)
 		errc <- err
 	}()
 	<-errc
+}
+
+func handleHTTP(w http.ResponseWriter, r *http.Request) {
+	r.RequestURI = ""
+	resp, err := http.DefaultTransport.RoundTrip(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
